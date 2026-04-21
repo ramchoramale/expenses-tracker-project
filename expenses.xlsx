@@ -1,8 +1,0 @@
-flask
-flask-cors
-flask-jwt-extended
-werkzeug
-scikit-learn
-twilio
-gunicorn
-numpy
