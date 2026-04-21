@@ -1,106 +1,246 @@
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import sqlite3
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from sklearn.linear_model import LinearRegression
+import numpy as np
+from twilio.rest import Client
+import random
+import datetime
 
-import pandas as pd
-import matplotlib.pyplot as plt
-import os
+app = Flask(__name__)
+CORS(app)
 
-FILE_NAME = "expenses.xlsx"
+app.config["JWT_SECRET_KEY"] = "super-secret-key"
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = datetime.timedelta(days=1)
 
-def load_data():
-    if os.path.exists(FILE_NAME):
-        return pd.read_excel(FILE_NAME)
-    else:
-        return pd.DataFrame(columns=["Date", "Category", "Amount", "Note"])
+jwt = JWTManager(app)
 
-def save_data(df):
-    df.to_excel(FILE_NAME, index=False)
+# ---------- TWILIO CONFIG ----------
+TWILIO_SID = "YOUR_SID"
+TWILIO_AUTH = "YOUR_AUTH"
+TWILIO_PHONE = "+1234567890"
 
-def add_expense():
-    date = input("Enter date (YYYY-MM-DD): ")
-    category = input("Enter category (Food, Travel, etc.): ")
-    amount = float(input("Enter amount: "))
-    note = input("Enter note (optional): ")
+client = Client(TWILIO_SID, TWILIO_AUTH)
 
-    df = load_data()
-    new_entry = pd.DataFrame([[date, category, amount, note]], columns=df.columns)
-    df = pd.concat([df, new_entry], ignore_index=True)
-    save_data(df)
-    print("✅ Expense added successfully!")
+otp_store = {}  # {phone: (otp, expiry)}
 
-def view_expenses():
-    df = load_data()
-    if df.empty:
-        print("No expenses found.")
-    else:
-        print("\n--- All Expenses ---")
-        print(df)
+# ---------- DATABASE ----------
+def get_db():
+    return sqlite3.connect("database.db")
 
-def show_pie_chart(df):
-    summary = df.groupby("Category")["Amount"].sum()
-    summary.plot.pie(autopct="%1.1f%%", figsize=(6, 6), title="Expense Breakdown by Category")
-    plt.ylabel("")
-    plt.show()
+def init():
+    with get_db() as conn:
+        cur = conn.cursor()
 
-def show_line_graph(df):
-    df_sorted = df.sort_values("Date")
-    df_grouped = df_sorted.groupby("Date")["Amount"].sum()
-    df_grouped.plot(kind="line", marker='o', title="Expenses Over Time", figsize=(8, 5))
-    plt.xlabel("Date")
-    plt.ylabel("Total Amount")
-    plt.grid(True)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.show()
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS users(
+            id INTEGER PRIMARY KEY,
+            email TEXT UNIQUE,
+            password TEXT,
+            phone TEXT
+        )
+        """)
 
-def show_bar_graph(df):
-    summary = df.groupby("Category")["Amount"].sum()
-    summary.plot(kind="bar", color="skyblue", title="Expenses by Category", figsize=(7, 4))
-    plt.xlabel("Category")
-    plt.ylabel("Total Amount")
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.show()
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS expenses(
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER,
+            amount REAL,
+            category TEXT,
+            date TEXT
+        )
+        """)
 
-def expense_summary():
-    df = load_data()
-    if df.empty:
-        print("No data to display.")
-        return
+init()
 
-    print("\n--- Summary Menu ---")
-    print("1. Pie Chart")
-    print("2. Line Graph (Daily Total)")
-    print("3. Bar Graph (By Category)")
-    choice = input("Enter your choice: ")
+# ---------- REGISTER ----------
+@app.route("/register", methods=["POST"])
+def register():
+    data = request.json
 
-    if choice == '1':
-        show_pie_chart(df)
-    elif choice == '2':
-        show_line_graph(df)
-    elif choice == '3':
-        show_bar_graph(df)
-    else:
-        print("❌ Invalid choice.")
+    if not data.get("email") or not data.get("password"):
+        return jsonify({"msg": "Missing fields"}), 400
 
-def main():
-    while True:
-        print("\n=== Expense Tracker ===")
-        print("1. Add Expense")
-        print("2. View All Expenses")
-        print("3. Show Graphical Summary")
-        print("4. Exit")
-        choice = input("Enter your choice: ")
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+            INSERT INTO users(email,password,phone)
+            VALUES(?,?,?)
+            """, (
+                data["email"],
+                generate_password_hash(data["password"]),
+                data.get("phone")
+            ))
+        return jsonify({"msg": "Registered successfully"})
+    except:
+        return jsonify({"msg": "User already exists"}), 400
 
-        if choice == '1':
-            add_expense()
-        elif choice == '2':
-            view_expenses()
-        elif choice == '3':
-            expense_summary()
-        elif choice == '4':
-            print("👋 Exiting... Goodbye!")
-            break
-        else:
-            print("❌ Invalid choice. Please try again.")
+# ---------- LOGIN ----------
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.json
 
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM users WHERE email=?", (data["email"],))
+        user = cur.fetchone()
+
+    if user and check_password_hash(user[2], data["password"]):
+        token = create_access_token(identity=user[0])
+        return jsonify({"token": token})
+
+    return jsonify({"msg": "Invalid credentials"}), 401
+
+# ---------- SEND OTP ----------
+@app.route("/send-otp", methods=["POST"])
+def send_otp():
+    phone = request.json.get("phone")
+
+    if not phone:
+        return jsonify({"msg": "Phone required"}), 400
+
+    otp = str(random.randint(100000, 999999))
+    expiry = datetime.datetime.now() + datetime.timedelta(minutes=5)
+
+    otp_store[phone] = (otp, expiry)
+
+    try:
+        client.messages.create(
+            body=f"Your OTP is {otp}",
+            from_=TWILIO_PHONE,
+            to=phone
+        )
+    except:
+        return jsonify({"msg": "OTP send failed"}), 500
+
+    return jsonify({"msg": "OTP sent"})
+
+# ---------- VERIFY OTP ----------
+@app.route("/verify-otp", methods=["POST"])
+def verify_otp():
+    phone = request.json.get("phone")
+    otp = request.json.get("otp")
+
+    if phone not in otp_store:
+        return jsonify({"msg": "No OTP found"}), 400
+
+    stored_otp, expiry = otp_store[phone]
+
+    if datetime.datetime.now() > expiry:
+        return jsonify({"msg": "OTP expired"}), 400
+
+    if stored_otp != otp:
+        return jsonify({"msg": "Invalid OTP"}), 400
+
+    # find user by phone
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE phone=?", (phone,))
+        user = cur.fetchone()
+
+    if not user:
+        return jsonify({"msg": "User not registered"}), 404
+
+    token = create_access_token(identity=user[0])
+    return jsonify({"token": token})
+
+# ---------- ADD EXPENSE ----------
+@app.route("/add", methods=["POST"])
+@jwt_required()
+def add():
+    uid = get_jwt_identity()
+    data = request.json
+
+    if not data.get("amount") or not data.get("category"):
+        return jsonify({"msg": "Missing fields"}), 400
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+        INSERT INTO expenses(user_id,amount,category,date)
+        VALUES(?,?,?,?)
+        """, (
+            uid,
+            float(data["amount"]),
+            data["category"],
+            datetime.datetime.now().isoformat()
+        ))
+
+    return jsonify({"msg": "Expense added"})
+
+# ---------- VIEW ----------
+@app.route("/view")
+@jwt_required()
+def view():
+    uid = get_jwt_identity()
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+        SELECT amount,category,date 
+        FROM expenses WHERE user_id=?
+        """, (uid,))
+        data = cur.fetchall()
+
+    return jsonify(data)
+
+# ---------- ANALYTICS ----------
+@app.route("/analytics")
+@jwt_required()
+def analytics():
+    uid = get_jwt_identity()
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+        SELECT amount,category,date 
+        FROM expenses WHERE user_id=?
+        """, (uid,))
+        rows = cur.fetchall()
+
+    by_category = {}
+    by_month = {}
+
+    for amt, cat, date in rows:
+        by_category[cat] = by_category.get(cat, 0) + amt
+
+        month = date[:7]
+        by_month[month] = by_month.get(month, 0) + amt
+
+    return jsonify({
+        "category": by_category,
+        "monthly": by_month
+    })
+
+# ---------- AI PREDICTION ----------
+@app.route("/predict")
+@jwt_required()
+def predict():
+    uid = get_jwt_identity()
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT amount FROM expenses WHERE user_id=?", (uid,))
+        data = cur.fetchall()
+
+    values = [d[0] for d in data]
+
+    if len(values) < 5:
+        return jsonify({"msg": "Not enough data"})
+
+    X = np.array(range(len(values))).reshape(-1, 1)
+    y = np.array(values)
+
+    model = LinearRegression()
+    model.fit(X, y)
+
+    pred = model.predict([[len(values)]])[0]
+
+    return jsonify({"prediction": float(pred)})
+
+# ---------- RUN ----------
 if __name__ == "__main__":
-    main()
+    app.run(debug=True)
