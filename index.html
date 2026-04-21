@@ -1,1 +1,238 @@
-create file
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Expense Pro</title>
+
+  <!-- React -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!-- Firebase -->
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-firestore-compat.js"></script>
+</head>
+
+<body class="bg-gray-100">
+<div id="root"></div>
+
+<script type="text/babel">
+
+// 🔥 YOUR FIREBASE CONFIG
+firebase.initializeApp({
+  apiKey: "YOUR_KEY",
+  authDomain: "YOUR_DOMAIN",
+  projectId: "YOUR_ID"
+});
+
+const auth = firebase.auth();
+const db = firebase.firestore();
+
+function App(){
+
+  const [user,setUser] = React.useState(null);
+  const [email,setEmail] = React.useState("");
+  const [password,setPassword] = React.useState("");
+  const [phone,setPhone] = React.useState("");
+  const [otp,setOtp] = React.useState("");
+
+  const [amount,setAmount] = React.useState("");
+  const [category,setCategory] = React.useState("Food");
+  const [expenses,setExpenses] = React.useState([]);
+
+  // 🔐 EMAIL REGISTER
+  const register = () => {
+    auth.createUserWithEmailAndPassword(email,password)
+      .then(res => setUser(res.user));
+  };
+
+  // 🔐 EMAIL LOGIN
+  const login = () => {
+    auth.signInWithEmailAndPassword(email,password)
+      .then(res => setUser(res.user));
+  };
+
+  // 🔐 PHONE OTP
+  const sendOTP = () => {
+    window.recaptchaVerifier = new firebase.auth.RecaptchaVerifier('recaptcha');
+    auth.signInWithPhoneNumber(phone, window.recaptchaVerifier)
+      .then(res => window.confirmationResult = res);
+  };
+
+  const verifyOTP = () => {
+    window.confirmationResult.confirm(otp)
+      .then(res => setUser(res.user));
+  };
+
+  // 💰 ADD EXPENSE
+  const add = async () => {
+    await db.collection("expenses").add({
+      uid:user.uid,
+      amount:parseFloat(amount),
+      category,
+      date:new Date()
+    });
+    setAmount("");
+    load();
+  };
+
+  // 📥 LOAD
+  const load = async () => {
+    const snap = await db.collection("expenses")
+      .where("uid","==",user.uid).get();
+
+    let data=[];
+    snap.forEach(doc=>data.push(doc.data()));
+    setExpenses(data);
+  };
+
+  React.useEffect(()=>{
+    if(user) load();
+  },[user]);
+
+  // ---------- LOGIN UI ----------
+  if(!user){
+    return (
+      <div className="flex justify-center items-center h-screen">
+        <div className="bg-white p-6 rounded shadow w-80">
+          <h2 className="font-bold text-lg mb-2">Login / Register</h2>
+
+          <input className="border p-2 w-full mb-2"
+            placeholder="Email"
+            onChange={e=>setEmail(e.target.value)}
+          />
+          <input className="border p-2 w-full mb-2"
+            type="password"
+            placeholder="Password"
+            onChange={e=>setPassword(e.target.value)}
+          />
+
+          <button className="bg-blue-500 text-white w-full p-2 mb-2"
+            onClick={login}>Login</button>
+
+          <button className="bg-green-500 text-white w-full p-2 mb-2"
+            onClick={register}>Register</button>
+
+          <hr className="my-2"/>
+
+          <input className="border p-2 w-full mb-2"
+            placeholder="+91XXXXXXXXXX"
+            onChange={e=>setPhone(e.target.value)}
+          />
+
+          <div id="recaptcha"></div>
+
+          <button className="bg-purple-500 text-white w-full p-2 mb-2"
+            onClick={sendOTP}>Send OTP</button>
+
+          <input className="border p-2 w-full mb-2"
+            placeholder="OTP"
+            onChange={e=>setOtp(e.target.value)}
+          />
+
+          <button className="bg-black text-white w-full p-2"
+            onClick={verifyOTP}>Verify OTP</button>
+        </div>
+      </div>
+    );
+  }
+
+  // 📊 ANALYTICS
+  const total = expenses.reduce((s,e)=>s+e.amount,0);
+
+  const byCategory = {};
+  const byMonth = {};
+
+  expenses.forEach(e=>{
+    byCategory[e.category] = (byCategory[e.category]||0)+e.amount;
+
+    const m = new Date(e.date.seconds*1000).toLocaleString("default",{month:"short"});
+    byMonth[m] = (byMonth[m]||0)+e.amount;
+  });
+
+  // 📊 CHARTS
+  React.useEffect(()=>{
+    if(expenses.length===0) return;
+
+    new Chart(document.getElementById("catChart"), {
+      type:"pie",
+      data:{
+        labels:Object.keys(byCategory),
+        datasets:[{data:Object.values(byCategory)}]
+      }
+    });
+
+    new Chart(document.getElementById("monthChart"), {
+      type:"bar",
+      data:{
+        labels:Object.keys(byMonth),
+        datasets:[{data:Object.values(byMonth)}]
+      }
+    });
+  },[expenses]);
+
+  // 🤖 AI CALL (dummy endpoint)
+  const predict = async ()=>{
+    const res = await fetch("http://127.0.0.1:5000/predict");
+    const data = await res.json();
+    alert("Next Expense Prediction: ₹ "+data.prediction);
+  };
+
+  return (
+    <div className="p-6">
+
+      <h1 className="text-2xl font-bold mb-4">💼 Expense Pro</h1>
+
+      <div className="bg-white p-4 rounded shadow mb-4">
+        <h2>Total: ₹ {total}</h2>
+      </div>
+
+      <div className="flex gap-2 mb-4">
+        <input className="border p-2 flex-1"
+          placeholder="Amount"
+          value={amount}
+          onChange={e=>setAmount(e.target.value)}
+        />
+
+        <select className="border p-2"
+          onChange={e=>setCategory(e.target.value)}>
+          <option>Food</option>
+          <option>Travel</option>
+          <option>Shopping</option>
+        </select>
+
+        <button className="bg-green-500 text-white px-4"
+          onClick={add}>Add</button>
+      </div>
+
+      <button className="bg-blue-500 text-white p-2 mb-4"
+        onClick={predict}>
+        🤖 Predict
+      </button>
+
+      <div className="grid grid-cols-2 gap-4">
+        <div className="bg-white p-4 rounded shadow">
+          <canvas id="catChart"></canvas>
+        </div>
+
+        <div className="bg-white p-4 rounded shadow">
+          <canvas id="monthChart"></canvas>
+        </div>
+      </div>
+
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+
+</script>
+</body>
+</html>
